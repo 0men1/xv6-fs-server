@@ -87,3 +87,25 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+int
+sys_send(void)
+{
+	int pid;
+	char* msg;
+
+	if (argint(0, &pid) < 0 || argptr(1, &msg, sizeof(struct ipc_msg)) < 0) 
+		return -1;
+
+	return send(pid, msg);
+}
+
+int
+sys_recv(void)
+{
+	char *msg;
+	if (argptr(0, &msg, sizeof(struct ipc_msg)) < 0) 
+		return -1;
+
+	return recv(msg);
+}

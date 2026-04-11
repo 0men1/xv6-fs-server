@@ -482,3 +482,63 @@ procdump(void)
     cprintf("\n");
   }
 }
+
+int send(int pid, void* msg) {
+	struct proc *target_p;
+	struct ipc_msg kmsg;
+
+	if (copyin(proc->pgdir, (void*)&kmsg, (addr_t)msg, sizeof(struct ipc_msg)) < 0) {
+		return -1;
+	}
+
+	kmsg.sender_pid = proc->pid;
+
+	acquire(&ptable.lock);
+	for (target_p = ptable.proc; target_p < &ptable.proc[NPROC]; target_p++) {
+		if (target_p->pid == pid) {
+			goto found;
+		}
+	}
+	release(&ptable.lock);
+
+	return -1;
+
+found:
+	while(target_p->has_msg == 1){
+		if(proc->killed){
+			release(&ptable.lock);
+			return -1;
+		}
+		sleep(&target_p->has_msg, &ptable.lock); 
+	}
+
+	memmove(&target_p->mailbox, &kmsg, sizeof(struct ipc_msg));
+	target_p->has_msg = 1;
+
+	wakeup1(target_p); 
+	release(&ptable.lock);
+
+	return 0;
+}
+
+int recv(void *msg) {
+	acquire(&ptable.lock);
+
+	while(proc->has_msg == 0){
+		if(proc->killed){
+			release(&ptable.lock);
+			return -1;
+		}
+		sleep(proc, &ptable.lock);
+	}
+
+
+	proc->has_msg = 0;
+	wakeup1(&proc->has_msg);
+	release(&ptable.lock);
+
+	if(copyout(proc->pgdir, (addr_t)msg, (char*)&proc->mailbox, sizeof(struct ipc_msg)) < 0)
+		return -1;
+
+	return 0;
+}

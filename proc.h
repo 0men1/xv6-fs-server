@@ -1,3 +1,5 @@
+#include "ipc.h"
+
 // Per-CPU state
 struct cpu {
   uchar id;
@@ -44,7 +46,7 @@ struct context {
   addr_t rip;
 };
 
-enum procstate { UNUSED, EMBRYO, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
+enum procstate { UNUSED, EMBRYO, SLEEPING, RUNNABLE, RUNNING, ZOMBIE, WAITING_IPC_REPLY };
 
 // Per-process state
 struct proc {
@@ -61,6 +63,8 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+	struct ipc_msg mailbox;
+	int has_msg; // 0 for empty, 1 for ful
 };
 
 // Process memory is laid out contiguously, low addresses first:

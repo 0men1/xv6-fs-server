@@ -118,6 +118,8 @@ void            userinit(void);
 int             wait(void);
 void            wakeup(void*);
 void            yield(void);
+int send(int, void*);
+int recv(void*);
 
 // swtch.S
 void            swtch(struct context**, struct context*);
@@ -184,6 +186,7 @@ pde_t*          copyuvm(pml4e_t*, uint);
 void            switchuvm(struct proc*);
 void            switchkvm(void);
 int             copyout(pml4e_t*, addr_t, void*, uint64);
+int		copyin(pml4e_t *pgdir, void *dst, addr_t srcva, uint64 len);
 void            clearpteu(pml4e_t *pgdir, char *uva);
 
 // number of elements in fixed-size array

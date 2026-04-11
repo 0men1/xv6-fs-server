@@ -467,3 +467,35 @@ copyout(pml4e_t *pgdir, addr_t va, void *p, uint64 len)
   }
   return 0;
 }
+
+
+int
+copyin(pml4e_t *pgdir, void *dst, addr_t srcva, uint64 len)
+{
+    char *pa0;
+    uint n, va0;
+
+    while(len > 0){
+        // Round down to the start of the page containing srcva
+        va0 = (uint)PGROUNDDOWN(srcva);
+
+        // Translate that user page to a kernel-accessible address
+        pa0 = uva2ka(pgdir, (char*)va0);
+        if(pa0 == 0)
+            return -1;   // page doesn't exist or not user-accessible
+
+        // How many bytes can we copy from this page without crossing into the next?
+        n = PGSIZE - (srcva - va0);
+        if(n > len)
+            n = len;
+
+        // pa0 is the start of the page; offset into it by (srcva - va0)
+        memmove(dst, pa0 + (srcva - va0), n);
+
+        len   -= n;
+        dst   += n;
+        srcva += n;    // advance to next page if len still > 0
+    }
+    return 0;
+}
+
