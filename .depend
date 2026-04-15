@@ -10,12 +10,14 @@ file.o: file.c types.h defs.h param.h fs.h spinlock.h sleeplock.h file.h
 forktest.o: forktest.c types.h stat.h user.h
 fs.o: fs.c types.h defs.h param.h stat.h mmu.h proc.h ipc.h spinlock.h \
  sleeplock.h fs.h buf.h file.h
+fsserver.o: fsserver.c types.h user.h fcntl.h ipc.h
+fstest.o: fstest.c types.h user.h fcntl.h ipc.h
 grep.o: grep.c types.h stat.h user.h
 ide.o: ide.c types.h defs.h param.h memlayout.h mmu.h proc.h ipc.h x86.h \
  traps.h spinlock.h sleeplock.h fs.h buf.h
 init.o: init.c types.h stat.h user.h fcntl.h
 ioapic.o: ioapic.c types.h defs.h traps.h memlayout.h
-ipctest.o: ipctest.c types.h stat.h user.h ipc.h
+ipctest.o: ipctest.c user.h types.h ipc.h
 kalloc.o: kalloc.c types.h defs.h param.h memlayout.h mmu.h spinlock.h
 kbd.o: kbd.c types.h x86.h defs.h kbd.h
 kill.o: kill.c types.h stat.h user.h

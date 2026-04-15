@@ -1,1 +1,1 @@
-ipctest.o: ipctest.c types.h stat.h user.h ipc.h
+ipctest.o: ipctest.c user.h types.h ipc.h
