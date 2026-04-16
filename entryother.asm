@@ -24,7 +24,7 @@ start:
 
   lgdt    gdtdesc
     7009:	0f 01 16             	lgdt   (%rsi)
-    700c:	6c                   	insb   (%dx),(%rdi)
+    700c:	6c                   	insb   (%dx),%es:(%rdi)
     700d:	70 0f                	jo     701e <start+0x1e>
   movl    %cr0, %eax
     700f:	20 c0                	and    %al,%al

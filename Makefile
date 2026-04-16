@@ -53,7 +53,7 @@ bootblock: bootasm.S bootmain.c
 	$(LD) -m elf_i386 -nostdlib -n -N -e start -Ttext 0x7C00 -o bootblocktmp.o bootasm.o bootmain.o
 	$(OBJDUMP) -S bootblocktmp.o > bootblock.asm
 	$(OBJCOPY) -S -O binary -j .text bootblocktmp.o bootblock
-	./sign.pl bootblock
+	perl sign.pl bootblock
 
 entryother: entryother.S
 	$(CC) $(CFLAGS) -fno-pic -nostdinc -I. -c entryother.S

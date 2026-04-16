@@ -2,6 +2,19 @@
 // Mostly argument checking, since we don't trust
 // user code, and calls into file.c and fs.c.
 //
+// DONE(01-current-fs-map): Current monolithic FS path:
+// sys_open validates user arguments, resolves or creates an inode through
+// fs.c, allocates a struct file in file.c, and installs it in proc->ofile[].
+// sys_read, sys_write, and sys_close fetch proc->ofile[] entries here, then
+// call file.c helpers. FD_INODE operations continue through fs.c inode code,
+// log.c transactions, bio.c buffers, and ide.c disk I/O.
+//
+// DONE(14-client-remote-fd): What: design how the kernel represents a
+// client-side remote file descriptor after fsserver opens a file. Options
+// include adding an FD_REMOTE type to struct file or adding a separate per-proc
+// remote fd table. Why: sys_read/sys_write/sys_close need a reliable way to
+// detect "this fd is served by fsserver" without confusing it with pipes,
+// devices, or old inode-backed files.
 
 #include "types.h"
 #include "defs.h"
@@ -14,6 +27,36 @@
 #include "sleeplock.h"
 #include "file.h"
 #include "fcntl.h"
+
+static int next_fs_request_id = 1;
+
+static int
+fsserver_active(void)
+{
+  return get_fsserver_pid() > 0 && !is_fsserver();
+}
+
+static int
+fs_ipc_call(struct ipc_msg *req, struct ipc_msg *reply)
+{
+  int server_pid;
+  int request_id;
+
+  server_pid = get_fsserver_pid();
+  if(server_pid < 0)
+    return -1;
+
+  request_id = __sync_fetch_and_add(&next_fs_request_id, 1);
+  req->request_id = request_id;
+
+  if(ipc_send_msg(server_pid, req) < 0)
+    return -1;
+  if(ipc_recv_msg(reply) < 0)
+    return -1;
+  if(reply->type != IPC_TYPE_FS_REPLY || reply->request_id != request_id)
+    return -1;
+  return 0;
+}
 
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
@@ -58,6 +101,8 @@ sys_dup(void)
 
   if(argfd(0, 0, &f) < 0)
     return -1;
+  if(f->type == FD_REMOTE)
+    return -1;
   if((fd=fdalloc(f)) < 0)
     return -1;
   filedup(f);
@@ -71,8 +116,45 @@ sys_read(void)
   int n;
   char *p;
 
+  // DONE(18-reroute-read): What: when fd is a remote fsserver file, validate
+  // the user buffer and byte count, send IPC_TYPE_FS_READ, wait for
+  // IPC_TYPE_FS_REPLY, and copy returned bytes into p. Why: normal user programs
+  // should call read() unchanged while the kernel forwards regular-file work to
+  // fsserver. Keep pipe/device reads local unless the design moves them too.
   if(argfd(0, 0, &f) < 0 || argint(2, &n) < 0 || argptr(1, &p, n) < 0)
     return -1;
+  if(f->type == FD_REMOTE){
+    struct ipc_msg req;
+    struct ipc_msg reply;
+    int total;
+    int chunk;
+
+    total = 0;
+    while(total < n){
+      chunk = n - total;
+      if(chunk > IPC_DATA_SIZE)
+        chunk = IPC_DATA_SIZE;
+
+      memset(&req, 0, sizeof(req));
+      req.type = IPC_TYPE_FS_READ;
+      req.fd = f->remote_fd;
+      req.nbytes = chunk;
+
+      if(fs_ipc_call(&req, &reply) < 0 || reply.result < 0)
+        return total > 0 ? total : -1;
+      if(reply.nbytes > reply.result)
+        return total > 0 ? total : -1;
+      if(reply.result == 0)
+        break;
+
+      memmove(p + total, reply.data, reply.result);
+      total += reply.result;
+
+      if(reply.result < chunk)
+        break;
+    }
+    return total;
+  }
   return fileread(f, p, n);
 }
 
@@ -83,8 +165,40 @@ sys_write(void)
   int n;
   char *p;
 
+  // DONE(19-reroute-write): What: when fd is a remote fsserver file, gather the
+  // user buffer into one or more IPC_DATA_SIZE payloads, send IPC_TYPE_FS_WRITE,
+  // and return the fsserver result. Why: write() must preserve the normal xv6
+  // API while moving regular-file writes through IPC.
   if(argfd(0, 0, &f) < 0 || argint(2, &n) < 0 || argptr(1, &p, n) < 0)
     return -1;
+  if(f->type == FD_REMOTE){
+    struct ipc_msg req;
+    struct ipc_msg reply;
+    int total;
+    int chunk;
+
+    total = 0;
+    while(total < n){
+      chunk = n - total;
+      if(chunk > IPC_DATA_SIZE)
+        chunk = IPC_DATA_SIZE;
+
+      memset(&req, 0, sizeof(req));
+      req.type = IPC_TYPE_FS_WRITE;
+      req.fd = f->remote_fd;
+      req.nbytes = chunk;
+      memmove(req.data, p + total, chunk);
+
+      if(fs_ipc_call(&req, &reply) < 0 || reply.result < 0)
+        return total > 0 ? total : -1;
+      if(reply.result == 0)
+        break;
+      total += reply.result;
+      if(reply.result < chunk)
+        break;
+    }
+    return total;
+  }
   return filewrite(f, p, n);
 }
 
@@ -94,8 +208,29 @@ sys_close(void)
   int fd;
   struct file *f;
 
+  // DONE(17-reroute-close): What: if fd is a remote fsserver descriptor, send
+  // IPC_TYPE_FS_CLOSE and clear client-side descriptor state only after the
+  // server confirms or returns a defined error. Why: close() owns cleanup, so
+  // stale remote descriptors here will leak server-side file state.
   if(argfd(0, &fd, &f) < 0)
     return -1;
+  if(f->type == FD_REMOTE){
+    struct ipc_msg req;
+    struct ipc_msg reply;
+    int result;
+
+    memset(&req, 0, sizeof(req));
+    req.type = IPC_TYPE_FS_CLOSE;
+    req.fd = f->remote_fd;
+
+    result = -1;
+    if(fs_ipc_call(&req, &reply) == 0)
+      result = reply.result;
+
+    proc->ofile[fd] = 0;
+    fileclose(f);
+    return result;
+  }
   proc->ofile[fd] = 0;
   fileclose(f);
   return 0;
@@ -288,8 +423,51 @@ sys_open(void)
   struct file *f;
   struct inode *ip;
 
+  // DONE(16-reroute-open): What: replace the regular-file branch with an
+  // IPC_TYPE_FS_OPEN request once fsserver registration and remote descriptors
+  // exist. Validate/copy the path, send flags, receive a remote fd, and install
+  // client-side state that read/write/close can recognize as remote. Why: this
+  // is the first point where normal user programs stop calling kernel FS logic
+  // directly. Avoid recursively rerouting calls made by fsserver itself.
   if(argstr(0, &path) < 0 || argint(1, &omode) < 0)
     return -1;
+
+  if(fsserver_active()){
+    struct ipc_msg req;
+    struct ipc_msg reply;
+
+    if(strlen(path) >= IPC_PATH_SIZE)
+      return -1;
+
+    memset(&req, 0, sizeof(req));
+    req.type = IPC_TYPE_FS_OPEN;
+    req.flags = omode;
+    safestrcpy(req.path, path, sizeof(req.path));
+
+    if(fs_ipc_call(&req, &reply) < 0 || reply.result < 0)
+      return -1;
+
+    if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
+      if(f)
+        fileclose(f);
+
+      memset(&req, 0, sizeof(req));
+      req.type = IPC_TYPE_FS_CLOSE;
+      req.fd = reply.fd;
+      fs_ipc_call(&req, &reply);
+      return -1;
+    }
+
+    f->type = FD_REMOTE;
+    f->ip = 0;
+    f->pipe = 0;
+    f->off = 0;
+    f->remote_fd = reply.fd;
+    f->remote_owner = get_fsserver_pid();
+    f->readable = !(omode & O_WRONLY);
+    f->writable = (omode & O_WRONLY) || (omode & O_RDWR);
+    return fd;
+  }
 
   begin_op();
 

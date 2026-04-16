@@ -109,3 +109,9 @@ sys_recv(void)
 
 	return recv(msg);
 }
+
+int
+sys_register_fsserver(void)
+{
+	return register_fsserver();
+}

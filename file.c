@@ -32,6 +32,14 @@ filealloc(void)
   for(f = ftable.file; f < ftable.file + NFILE; f++){
     if(f->ref == 0){
       f->ref = 1;
+      f->type = FD_NONE;
+      f->readable = 0;
+      f->writable = 0;
+      f->pipe = 0;
+      f->ip = 0;
+      f->off = 0;
+      f->remote_fd = -1;
+      f->remote_owner = -1;
       release(&ftable.lock);
       return f;
     }
@@ -68,6 +76,8 @@ fileclose(struct file *f)
   ff = *f;
   f->ref = 0;
   f->type = FD_NONE;
+  f->remote_fd = -1;
+  f->remote_owner = -1;
   release(&ftable.lock);
 
   if(ff.type == FD_PIPE)
@@ -76,6 +86,10 @@ fileclose(struct file *f)
     begin_op();
     iput(ff.ip);
     end_op();
+  }
+  else if(ff.type == FD_REMOTE){
+    // Remote cleanup is handled by sys_close(), where the caller can still
+    // send an IPC close request to fsserver before dropping the local file.
   }
 }
 

@@ -22,3 +22,4 @@
 #define SYS_close  21
 #define SYS_send 22
 #define SYS_recv 23
+#define SYS_register_fsserver 24

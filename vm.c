@@ -472,8 +472,13 @@ copyout(pml4e_t *pgdir, addr_t va, void *p, uint64 len)
 int
 copyin(pml4e_t *pgdir, void *dst, addr_t srcva, uint64 len)
 {
+    // DONE(04-copyin-64bit): What: match copyout()'s address types throughout
+    // this helper by using addr_t-sized values for srcva, va0, and offsets.
+    // Why: this is xv6-64, so truncating addresses through uint can make IPC
+    // buffer validation/copying subtly wrong even if current tests use low
+    // addresses.
     char *pa0;
-    uint n, va0;
+    addr_t n, va0;
 
     while(len > 0){
         // Round down to the start of the page containing srcva

@@ -63,6 +63,10 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+	// DONE(05-ipc-state-owner): What: treat these fields as per-process IPC
+	// state that must be initialized in allocproc() and cleared on exit/wait().
+	// Why: a recycled proc table slot must never inherit a stale mailbox,
+	// sender_pid, or has_msg value from an older process.
 	struct ipc_msg mailbox;
 	int has_msg; // 0 for empty, 1 for ful
 };

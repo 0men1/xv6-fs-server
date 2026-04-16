@@ -15,6 +15,7 @@ struct {
 static struct proc *initproc;
 
 int nextpid = 1;
+int fsserver_pid = -1;
 extern void forkret(void);
 extern void syscall_trapret(void);
 
@@ -51,6 +52,12 @@ found:
   p->pid = nextpid++;
 
   release(&ptable.lock);
+
+  // DONE(05-ipc-state-owner): What: reset p->mailbox and p->has_msg here before
+  // the process becomes visible as RUNNABLE. Why: a newly allocated process
+  // must start with an empty mailbox, not stale IPC data left in this proc slot.
+  memset(&p->mailbox, 0, sizeof(p->mailbox));
+  p->has_msg = 0;
 
   // Allocate kernel stack.
   if((p->kstack = kalloc()) == 0){
@@ -177,9 +184,20 @@ exit(void)
 {
   struct proc *p;
   int fd;
+  struct ipc_msg msg;
 
   if(proc == initproc)
     panic("init exiting");
+
+  // DONE(07-ipc-exit-wakeup): What: before closing resources, wake any process
+  // blocked in send() because this process's mailbox was full, and define what
+  // happens to an unread message in this process's mailbox. Why: a sender must
+  // get a clean failure instead of sleeping forever after the receiver exits.
+  if(fsserver_pid > 0 && fsserver_pid != proc->pid){
+    memset(&msg, 0, sizeof(msg));
+    msg.type = IPC_TYPE_FS_CLIENT_EXIT;
+    ipc_send_msg(fsserver_pid, &msg);
+  }
 
   // Close all open files.
   for(fd = 0; fd < NOFILE; fd++){
@@ -195,6 +213,13 @@ exit(void)
   proc->cwd = 0;
 
   acquire(&ptable.lock);
+
+  if(fsserver_pid == proc->pid)
+    fsserver_pid = -1;
+
+  proc->has_msg = 0;
+  memset(&proc->mailbox, 0, sizeof(proc->mailbox));
+  wakeup1(&proc->has_msg);
 
   // Parent might be sleeping in wait().
   wakeup1(proc->parent);
@@ -241,6 +266,12 @@ wait(void)
         p->parent = 0;
         p->name[0] = 0;
         p->killed = 0;
+        // DONE(05-ipc-state-owner): What: clear p->mailbox and p->has_msg
+        // before marking this slot UNUSED. Why: this is the cleanup half of the
+        // allocproc() initialization work and prevents IPC state from leaking
+        // across process lifetimes.
+        memset(&p->mailbox, 0, sizeof(p->mailbox));
+        p->has_msg = 0;
         p->state = UNUSED;
         release(&ptable.lock);
         return pid;
@@ -483,15 +514,60 @@ procdump(void)
   }
 }
 
-int send(int pid, void* msg) {
+static int
+valid_ipc_msg(struct ipc_msg *msg)
+{
+	if(msg->nbytes < 0 || msg->nbytes > IPC_DATA_SIZE)
+		return 0;
+	switch(msg->type){
+	case IPC_TYPE_FS_OPEN:
+	case IPC_TYPE_FS_READ:
+	case IPC_TYPE_FS_WRITE:
+	case IPC_TYPE_FS_CLOSE:
+	case IPC_TYPE_FS_REPLY:
+	case IPC_TYPE_FS_SHUTDOWN:
+	case IPC_TYPE_FS_CLIENT_EXIT:
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+int
+register_fsserver(void)
+{
+	acquire(&ptable.lock);
+	fsserver_pid = proc->pid;
+	release(&ptable.lock);
+	return 0;
+}
+
+int
+get_fsserver_pid(void)
+{
+	return fsserver_pid;
+}
+
+int
+is_fsserver(void)
+{
+	return fsserver_pid == proc->pid;
+}
+
+int
+ipc_send_msg(int pid, struct ipc_msg *msg)
+{
 	struct proc *target_p;
 	struct ipc_msg kmsg;
 
-	if (copyin(proc->pgdir, (void*)&kmsg, (addr_t)msg, sizeof(struct ipc_msg)) < 0) {
+	if(msg == 0)
 		return -1;
-	}
 
+	memmove(&kmsg, msg, sizeof(kmsg));
 	kmsg.sender_pid = proc->pid;
+
+	if(!valid_ipc_msg(&kmsg))
+		return -1;
 
 	acquire(&ptable.lock);
 	for (target_p = ptable.proc; target_p < &ptable.proc[NPROC]; target_p++) {
@@ -504,8 +580,21 @@ int send(int pid, void* msg) {
 	return -1;
 
 found:
+	// DONE(09-send-target-state): What: reject sends to UNUSED, EMBRYO, ZOMBIE,
+	// or killed processes. Why: a PID match alone is not enough because the
+	// target may be exiting or already dead while another process is sending.
+	if(target_p->state == UNUSED || target_p->state == EMBRYO ||
+	   target_p->state == ZOMBIE || target_p->killed){
+		release(&ptable.lock);
+		return -1;
+	}
+
 	while(target_p->has_msg == 1){
-		if(proc->killed){
+		// DONE(10-send-blocking): What: if the target exits while this sender is
+		// sleeping on target_p->has_msg, wake this sender and return -1. Why:
+		// multi-client fsserver tests should fail cleanly instead of hanging.
+		if(proc->killed || target_p->state == UNUSED ||
+		   target_p->state == ZOMBIE || target_p->killed){
 			release(&ptable.lock);
 			return -1;
 		}
@@ -515,13 +604,43 @@ found:
 	memmove(&target_p->mailbox, &kmsg, sizeof(struct ipc_msg));
 	target_p->has_msg = 1;
 
+	// DONE(11-ipc-queue-policy): What: decide whether this one-slot mailbox is
+	// enough for the final demo; if not, replace it with a bounded per-process
+	// queue. Why: a real fsserver may receive requests from multiple clients and
+	// should not be fragile under simple concurrency.
 	wakeup1(target_p); 
 	release(&ptable.lock);
 
 	return 0;
 }
 
-int recv(void *msg) {
+int
+send(int pid, void* msg) {
+	struct ipc_msg kmsg;
+
+	// DONE(08-send-validation): What: keep copyin() before taking ptable.lock,
+	// then validate that msg points to a full struct ipc_msg and that the
+	// requested message type is legal for the caller. Why: syscall rerouting
+	// will depend on send() rejecting malformed or unauthorized FS messages.
+	if (copyin(proc->pgdir, (void*)&kmsg, (addr_t)msg, sizeof(struct ipc_msg)) < 0) {
+		return -1;
+	}
+
+	return ipc_send_msg(pid, &kmsg);
+}
+
+int
+ipc_recv_msg(struct ipc_msg *msg)
+{
+	struct ipc_msg kmsg;
+
+	// DONE(06-recv-snapshot): What: copy proc->mailbox into a local kernel
+	// variable while holding ptable.lock, then clear has_msg, release the lock,
+	// and copy that local snapshot out to user space. Why: another sender should
+	// not be able to overwrite proc->mailbox before copyout() finishes.
+	if(msg == 0)
+		return -1;
+
 	acquire(&ptable.lock);
 
 	while(proc->has_msg == 0){
@@ -533,11 +652,25 @@ int recv(void *msg) {
 	}
 
 
+	memmove(&kmsg, &proc->mailbox, sizeof(kmsg));
 	proc->has_msg = 0;
+	memset(&proc->mailbox, 0, sizeof(proc->mailbox));
 	wakeup1(&proc->has_msg);
 	release(&ptable.lock);
 
-	if(copyout(proc->pgdir, (addr_t)msg, (char*)&proc->mailbox, sizeof(struct ipc_msg)) < 0)
+	memmove(msg, &kmsg, sizeof(kmsg));
+
+	return 0;
+}
+
+int
+recv(void *msg) {
+	struct ipc_msg kmsg;
+
+	if(ipc_recv_msg(&kmsg) < 0)
+		return -1;
+
+	if(copyout(proc->pgdir, (addr_t)msg, (char*)&kmsg, sizeof(struct ipc_msg)) < 0)
 		return -1;
 
 	return 0;

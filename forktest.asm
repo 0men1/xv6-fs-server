@@ -62,7 +62,7 @@ forktest(void)
   int n, pid;
 
   printf(1, "fork test\n");
-    10a1:	48 b8 78 16 00 00 00 	movabs $0x1678,%rax
+    10a1:	48 b8 80 16 00 00 00 	movabs $0x1680,%rax
     10a8:	00 00 00 
     10ab:	48 89 c6             	mov    %rax,%rsi
     10ae:	bf 01 00 00 00       	mov    $0x1,%edi
@@ -104,7 +104,7 @@ forktest(void)
     110b:	75 77                	jne    1184 <forktest+0xef>
     printf(1, "fork claimed to work N times!\n", N);
     110d:	ba e8 03 00 00       	mov    $0x3e8,%edx
-    1112:	48 b8 88 16 00 00 00 	movabs $0x1688,%rax
+    1112:	48 b8 90 16 00 00 00 	movabs $0x1690,%rax
     1119:	00 00 00 
     111c:	48 89 c6             	mov    %rax,%rsi
     111f:	bf 01 00 00 00       	mov    $0x1,%edi
@@ -126,7 +126,7 @@ forktest(void)
     114d:	85 c0                	test   %eax,%eax
     114f:	79 2f                	jns    1180 <forktest+0xeb>
       printf(1, "wait stopped early\n");
-    1151:	48 b8 a7 16 00 00 00 	movabs $0x16a7,%rax
+    1151:	48 b8 af 16 00 00 00 	movabs $0x16af,%rax
     1158:	00 00 00 
     115b:	48 89 c6             	mov    %rax,%rsi
     115e:	bf 01 00 00 00       	mov    $0x1,%edi
@@ -152,7 +152,7 @@ forktest(void)
     1196:	83 f8 ff             	cmp    $0xffffffff,%eax
     1199:	74 2f                	je     11ca <forktest+0x135>
     printf(1, "wait got too many\n");
-    119b:	48 b8 bb 16 00 00 00 	movabs $0x16bb,%rax
+    119b:	48 b8 c3 16 00 00 00 	movabs $0x16c3,%rax
     11a2:	00 00 00 
     11a5:	48 89 c6             	mov    %rax,%rsi
     11a8:	bf 01 00 00 00       	mov    $0x1,%edi
@@ -167,7 +167,7 @@ forktest(void)
   }
 
   printf(1, "fork test OK\n");
-    11ca:	48 b8 ce 16 00 00 00 	movabs $0x16ce,%rax
+    11ca:	48 b8 d6 16 00 00 00 	movabs $0x16d6,%rax
     11d1:	00 00 00 
     11d4:	48 89 c6             	mov    %rax,%rsi
     11d7:	bf 01 00 00 00       	mov    $0x1,%edi
@@ -585,139 +585,174 @@ memmove(void *vdst, void *vsrc, int n)
     1545:	c3                   	ret
 
 0000000000001546 <fork>:
+    mov $SYS_ ## name, %rax; \
+    mov %rcx, %r10 ;\
+    syscall		  ;\
+    ret
+
+SYSCALL(fork)
     1546:	48 c7 c0 01 00 00 00 	mov    $0x1,%rax
     154d:	49 89 ca             	mov    %rcx,%r10
     1550:	0f 05                	syscall
     1552:	c3                   	ret
 
 0000000000001553 <exit>:
+SYSCALL(exit)
     1553:	48 c7 c0 02 00 00 00 	mov    $0x2,%rax
     155a:	49 89 ca             	mov    %rcx,%r10
     155d:	0f 05                	syscall
     155f:	c3                   	ret
 
 0000000000001560 <wait>:
+SYSCALL(wait)
     1560:	48 c7 c0 03 00 00 00 	mov    $0x3,%rax
     1567:	49 89 ca             	mov    %rcx,%r10
     156a:	0f 05                	syscall
     156c:	c3                   	ret
 
 000000000000156d <pipe>:
+SYSCALL(pipe)
     156d:	48 c7 c0 04 00 00 00 	mov    $0x4,%rax
     1574:	49 89 ca             	mov    %rcx,%r10
     1577:	0f 05                	syscall
     1579:	c3                   	ret
 
 000000000000157a <read>:
+SYSCALL(read)
     157a:	48 c7 c0 05 00 00 00 	mov    $0x5,%rax
     1581:	49 89 ca             	mov    %rcx,%r10
     1584:	0f 05                	syscall
     1586:	c3                   	ret
 
 0000000000001587 <write>:
+SYSCALL(write)
     1587:	48 c7 c0 10 00 00 00 	mov    $0x10,%rax
     158e:	49 89 ca             	mov    %rcx,%r10
     1591:	0f 05                	syscall
     1593:	c3                   	ret
 
 0000000000001594 <close>:
+SYSCALL(close)
     1594:	48 c7 c0 15 00 00 00 	mov    $0x15,%rax
     159b:	49 89 ca             	mov    %rcx,%r10
     159e:	0f 05                	syscall
     15a0:	c3                   	ret
 
 00000000000015a1 <kill>:
+SYSCALL(kill)
     15a1:	48 c7 c0 06 00 00 00 	mov    $0x6,%rax
     15a8:	49 89 ca             	mov    %rcx,%r10
     15ab:	0f 05                	syscall
     15ad:	c3                   	ret
 
 00000000000015ae <exec>:
+SYSCALL(exec)
     15ae:	48 c7 c0 07 00 00 00 	mov    $0x7,%rax
     15b5:	49 89 ca             	mov    %rcx,%r10
     15b8:	0f 05                	syscall
     15ba:	c3                   	ret
 
 00000000000015bb <open>:
+SYSCALL(open)
     15bb:	48 c7 c0 0f 00 00 00 	mov    $0xf,%rax
     15c2:	49 89 ca             	mov    %rcx,%r10
     15c5:	0f 05                	syscall
     15c7:	c3                   	ret
 
 00000000000015c8 <mknod>:
+SYSCALL(mknod)
     15c8:	48 c7 c0 11 00 00 00 	mov    $0x11,%rax
     15cf:	49 89 ca             	mov    %rcx,%r10
     15d2:	0f 05                	syscall
     15d4:	c3                   	ret
 
 00000000000015d5 <unlink>:
+SYSCALL(unlink)
     15d5:	48 c7 c0 12 00 00 00 	mov    $0x12,%rax
     15dc:	49 89 ca             	mov    %rcx,%r10
     15df:	0f 05                	syscall
     15e1:	c3                   	ret
 
 00000000000015e2 <fstat>:
+SYSCALL(fstat)
     15e2:	48 c7 c0 08 00 00 00 	mov    $0x8,%rax
     15e9:	49 89 ca             	mov    %rcx,%r10
     15ec:	0f 05                	syscall
     15ee:	c3                   	ret
 
 00000000000015ef <link>:
+SYSCALL(link)
     15ef:	48 c7 c0 13 00 00 00 	mov    $0x13,%rax
     15f6:	49 89 ca             	mov    %rcx,%r10
     15f9:	0f 05                	syscall
     15fb:	c3                   	ret
 
 00000000000015fc <mkdir>:
+SYSCALL(mkdir)
     15fc:	48 c7 c0 14 00 00 00 	mov    $0x14,%rax
     1603:	49 89 ca             	mov    %rcx,%r10
     1606:	0f 05                	syscall
     1608:	c3                   	ret
 
 0000000000001609 <chdir>:
+SYSCALL(chdir)
     1609:	48 c7 c0 09 00 00 00 	mov    $0x9,%rax
     1610:	49 89 ca             	mov    %rcx,%r10
     1613:	0f 05                	syscall
     1615:	c3                   	ret
 
 0000000000001616 <dup>:
+SYSCALL(dup)
     1616:	48 c7 c0 0a 00 00 00 	mov    $0xa,%rax
     161d:	49 89 ca             	mov    %rcx,%r10
     1620:	0f 05                	syscall
     1622:	c3                   	ret
 
 0000000000001623 <getpid>:
+SYSCALL(getpid)
     1623:	48 c7 c0 0b 00 00 00 	mov    $0xb,%rax
     162a:	49 89 ca             	mov    %rcx,%r10
     162d:	0f 05                	syscall
     162f:	c3                   	ret
 
 0000000000001630 <sbrk>:
+SYSCALL(sbrk)
     1630:	48 c7 c0 0c 00 00 00 	mov    $0xc,%rax
     1637:	49 89 ca             	mov    %rcx,%r10
     163a:	0f 05                	syscall
     163c:	c3                   	ret
 
 000000000000163d <sleep>:
+SYSCALL(sleep)
     163d:	48 c7 c0 0d 00 00 00 	mov    $0xd,%rax
     1644:	49 89 ca             	mov    %rcx,%r10
     1647:	0f 05                	syscall
     1649:	c3                   	ret
 
 000000000000164a <uptime>:
+SYSCALL(uptime)
     164a:	48 c7 c0 0e 00 00 00 	mov    $0xe,%rax
     1651:	49 89 ca             	mov    %rcx,%r10
     1654:	0f 05                	syscall
     1656:	c3                   	ret
 
 0000000000001657 <send>:
+SYSCALL(send)
     1657:	48 c7 c0 16 00 00 00 	mov    $0x16,%rax
     165e:	49 89 ca             	mov    %rcx,%r10
     1661:	0f 05                	syscall
     1663:	c3                   	ret
 
 0000000000001664 <recv>:
+SYSCALL(recv)
     1664:	48 c7 c0 17 00 00 00 	mov    $0x17,%rax
     166b:	49 89 ca             	mov    %rcx,%r10
     166e:	0f 05                	syscall
     1670:	c3                   	ret
+
+0000000000001671 <register_fsserver>:
+SYSCALL(register_fsserver)
+    1671:	48 c7 c0 18 00 00 00 	mov    $0x18,%rax
+    1678:	49 89 ca             	mov    %rcx,%r10
+    167b:	0f 05                	syscall
+    167d:	c3                   	ret

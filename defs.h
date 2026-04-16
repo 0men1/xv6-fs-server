@@ -2,6 +2,7 @@ struct buf;
 struct context;
 struct file;
 struct inode;
+struct ipc_msg;
 struct pipe;
 struct proc;
 struct rtcdate;
@@ -120,6 +121,11 @@ void            wakeup(void*);
 void            yield(void);
 int send(int, void*);
 int recv(void*);
+int ipc_send_msg(int, struct ipc_msg*);
+int ipc_recv_msg(struct ipc_msg*);
+int register_fsserver(void);
+int get_fsserver_pid(void);
+int is_fsserver(void);
 
 // swtch.S
 void            swtch(struct context**, struct context*);
