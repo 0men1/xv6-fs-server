@@ -6,6 +6,7 @@
 #include "fcntl.h"
 
 char *argv[] = { "sh", 0 };
+char *fsserver_argv[] = { "fsserver", 0 };
 
 int
 main(void)
@@ -18,6 +19,17 @@ main(void)
   }
   dup(0);  // stdout
   dup(0);  // stderr
+
+  pid = fork();
+  if(pid < 0){
+    printf(1, "init: fork failed\n");
+    exit();
+  }
+  if(pid == 0){
+    exec("fsserver", fsserver_argv);
+    printf(1, "init: exec fsserver failed\n");
+    exit();
+  }
 
   for(;;){
     printf(1, "init: starting sh\n");
