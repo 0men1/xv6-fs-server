@@ -28,6 +28,7 @@ int uptime(void);
 int send(int, void*);
 int recv(void*);
 int register_fsserver(void);
+int disk_request(uint, void*, int);
 
 // ulib.c
 int stat(char*, struct stat*);

@@ -23,3 +23,4 @@
 #define SYS_send 22
 #define SYS_recv 23
 #define SYS_register_fsserver 24
+#define SYS_disk_request 25

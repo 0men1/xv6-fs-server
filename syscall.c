@@ -125,6 +125,7 @@ extern addr_t sys_uptime(void);
 extern addr_t sys_send(void);
 extern addr_t sys_recv(void);
 extern addr_t sys_register_fsserver(void);
+extern addr_t sys_disk_request(void);
 
 // PAGEBREAK!
 static addr_t (*syscalls[])(void) = {
@@ -151,7 +152,8 @@ static addr_t (*syscalls[])(void) = {
 [SYS_close]   sys_close,
 	[SYS_send] sys_send,
 	[SYS_recv] sys_recv,
-	[SYS_register_fsserver] sys_register_fsserver
+	[SYS_register_fsserver] sys_register_fsserver,
+	[SYS_disk_request] sys_disk_request
 };
 
 void

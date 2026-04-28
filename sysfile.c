@@ -423,12 +423,6 @@ sys_open(void)
   struct file *f;
   struct inode *ip;
 
-  // DONE(16-reroute-open): What: replace the regular-file branch with an
-  // IPC_TYPE_FS_OPEN request once fsserver registration and remote descriptors
-  // exist. Validate/copy the path, send flags, receive a remote fd, and install
-  // client-side state that read/write/close can recognize as remote. Why: this
-  // is the first point where normal user programs stop calling kernel FS logic
-  // directly. Avoid recursively rerouting calls made by fsserver itself.
   if(argstr(0, &path) < 0 || argint(1, &omode) < 0)
     return -1;
 
