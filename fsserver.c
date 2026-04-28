@@ -2,103 +2,444 @@
 #include "user.h"
 #include "fcntl.h"
 #include "ipc.h"
+#include "fs.h"
+#include "stat.h"
 
 #define MAX_REMOTE_FDS 64
-#define MAX_MEM_FILES 32
-#define MAX_FILE_SIZE 4096
+#define NINODE 32
+#define NBUF 32
+#define ROOTDEV 1
 
-// DONE(12-fsserver-registration): What: turn this demo server into the
-// long-running filesystem daemon described in the proposal. Decide how it
-// starts during boot, how its pid is registered with the kernel or clients, how
-// clients discover it, and how the system recovers if it exits unexpectedly.
-// Why: sys_open/read/write/close cannot be rerouted until the kernel knows
-// which process is the trusted fsserver.
-//
-// DONE(20-storage-interface): What: decide what minimal kernel interface
-// remains for disk/block access after moving filesystem logic to user space.
-// The server likely needs block read/write or disk RPC primitives plus log
-// consistency rules. Why: user-space fsserver cannot call kernel-only helpers
-// like bread(), bwrite(), readi(), or writei() directly.
-//
-// DONE(21-port-fs-logic): What: replace the proxy behavior in this file with
-// ported regular-file logic from sysfile.c, file.c, fs.c, log.c, and related
-// helpers. Why: while fsserver calls normal xv6 open/read/write/close, the real
-// filesystem still lives in the kernel and Phase 3 is not complete.
+struct ubuf {
+  int flags;
+  uint dev;
+  uint blockno;
+  int refcnt;
+  struct ubuf *prev;
+  struct ubuf *next;
+  uchar data[BSIZE];
+};
+
+#define B_VALID 0x2
+#define B_DIRTY 0x4
+
+struct uinode {
+  uint dev;
+  uint inum;
+  int ref;
+  short type;
+  short major;
+  short minor;
+  short nlink;
+  uint size;
+  uint addrs[NDIRECT+1];
+  int valid;
+};
+
+#define I_VALID 0x2
+#define umin(a, b) ((a) < (b) ? (a) : (b))
+
+static int unamecmp(char *s1, char *s2) {
+  while(*s1 && *s2 && *s1 == *s2) { s1++; s2++; }
+  return *s1 - *s2;
+}
+
+static struct ubuf ubuf_cache[NBUF];
+static struct ubuf ubuf_head;
+static struct uinode uinode_cache[NINODE];
+static struct superblock sb;
+
+static void ubuf_init(void) {
+  int i;
+  ubuf_head.prev = &ubuf_head;
+  ubuf_head.next = &ubuf_head;
+  for(i = 0; i < NBUF; i++) {
+    ubuf_cache[i].next = ubuf_head.next;
+    ubuf_cache[i].prev = &ubuf_head;
+    ubuf_head.next->prev = &ubuf_cache[i];
+    ubuf_head.next = &ubuf_cache[i];
+  }
+}
+
+static struct ubuf* ubuf_get(uint dev, uint blockno) {
+  struct ubuf *b;
+  for(b = ubuf_head.next; b != &ubuf_head; b = b->next) {
+    if(b->dev == dev && b->blockno == blockno) {
+      b->refcnt++;
+      return b;
+    }
+  }
+  for(b = ubuf_head.prev; b != &ubuf_head; b = b->prev) {
+    if(b->refcnt == 0) {
+      b->dev = dev;
+      b->blockno = blockno;
+      b->flags = 0;
+      b->refcnt = 1;
+      return b;
+    }
+  }
+  return 0;
+}
+
+static struct ubuf* ubread(uint dev, uint blockno) {
+  struct ubuf *b;
+  b = ubuf_get(dev, blockno);
+  if(b && !(b->flags & B_VALID)) {
+    if(disk_request(blockno, b->data, 0) < 0) {
+      b->refcnt--;
+      return 0;
+    }
+    b->flags |= B_VALID;
+  }
+  return b;
+}
+
+static void ubwrite(struct ubuf *b) {
+  disk_request(b->blockno, b->data, 1);
+}
+
+static void ubrelse(struct ubuf *b) {
+  b->refcnt--;
+}
+
+static void uinode_init(void) {
+  int i;
+  for(i = 0; i < NINODE; i++)
+    uinode_cache[i].ref = 0;
+}
+
+static struct uinode* uiget(uint dev, uint inum) {
+  struct uinode *ip, *empty;
+  empty = 0;
+  for(ip = uinode_cache; ip < &uinode_cache[NINODE]; ip++) {
+    if(ip->ref > 0 && ip->dev == dev && ip->inum == inum) {
+      ip->ref++;
+      return ip;
+    }
+    if(empty == 0 && ip->ref == 0)
+      empty = ip;
+  }
+  if(empty == 0)
+    return 0;
+  ip = empty;
+  ip->dev = dev;
+  ip->inum = inum;
+  ip->ref = 1;
+  ip->valid = 0;
+  return ip;
+}
+
+static void uilock(struct uinode *ip) {
+  struct ubuf *bp;
+  struct dinode *dip;
+  if(ip->valid)
+    return;
+  bp = ubread(ip->dev, IBLOCK(ip->inum, sb));
+  if(bp == 0)
+    return;
+  dip = (struct dinode*)bp->data + ip->inum % IPB;
+  ip->type = dip->type;
+  ip->major = dip->major;
+  ip->minor = dip->minor;
+  ip->nlink = dip->nlink;
+  ip->size = dip->size;
+  memmove(ip->addrs, dip->addrs, sizeof(ip->addrs));
+  ubrelse(bp);
+  ip->valid = 1;
+}
+
+static void uiput(struct uinode *ip) {
+  ip->ref--;
+  if(ip->ref == 0)
+    ip->valid = 0;
+}
+
+static void uiupdate(struct uinode *ip) {
+  struct ubuf *bp;
+  struct dinode *dip;
+  bp = ubread(ip->dev, IBLOCK(ip->inum, sb));
+  if(bp == 0)
+    return;
+  dip = (struct dinode*)bp->data + ip->inum % IPB;
+  dip->type = ip->type;
+  dip->major = ip->major;
+  dip->minor = ip->minor;
+  dip->nlink = ip->nlink;
+  dip->size = ip->size;
+  memmove(dip->addrs, ip->addrs, sizeof(ip->addrs));
+  ubwrite(bp);
+  ubrelse(bp);
+}
+
+static void readsb(void) {
+  struct ubuf *bp = ubread(ROOTDEV, 1);
+  if(bp) {
+    memmove(&sb, bp->data, sizeof(sb));
+    ubrelse(bp);
+  }
+}
+
+static uint balloc(void) {
+  int b, bi, m;
+  struct ubuf *bp;
+  for(b = 0; b < sb.size; b += BPB) {
+    bp = ubread(ROOTDEV, BBLOCK(b, sb));
+    if(bp == 0) continue;
+    for(bi = 0; bi < BPB && b + bi < sb.size; bi++) {
+      m = 1 << (bi % 8);
+      if((bp->data[bi/8] & m) == 0) {
+        bp->data[bi/8] |= m;
+        ubwrite(bp);
+        ubrelse(bp);
+        return b + bi;
+      }
+    }
+    ubrelse(bp);
+  }
+  return 0;
+}
+
+static void bfree(uint b) {
+  int bi, m;
+  struct ubuf *bp;
+  readsb();
+  bp = ubread(ROOTDEV, BBLOCK(b, sb));
+  if(bp == 0) return;
+  bi = b % BPB;
+  m = 1 << (bi % 8);
+  if((bp->data[bi/8] & m) == 0) {
+    ubrelse(bp);
+    return;
+  }
+  bp->data[bi/8] &= ~m;
+  ubwrite(bp);
+  ubrelse(bp);
+}
+
+static uint bmap(struct uinode *ip, uint bn) {
+  uint addr;
+  struct ubuf *bp;
+  uint *a;
+  if(bn < NDIRECT) {
+    if((addr = ip->addrs[bn]) == 0) {
+      addr = balloc();
+      if(addr == 0) return 0;
+      ip->addrs[bn] = addr;
+    }
+    return addr;
+  }
+  bn -= NDIRECT;
+  if(bn < NINDIRECT) {
+    if((addr = ip->addrs[NDIRECT]) == 0) {
+      addr = balloc();
+      if(addr == 0) return 0;
+      ip->addrs[NDIRECT] = addr;
+    }
+    bp = ubread(ROOTDEV, addr);
+    if(bp == 0) return 0;
+    a = (uint*)bp->data;
+    if((addr = a[bn]) == 0) {
+      addr = balloc();
+      if(addr == 0) { ubrelse(bp); return 0; }
+      a[bn] = addr;
+      ubwrite(bp);
+    }
+    ubrelse(bp);
+    return addr;
+  }
+  return 0;
+}
+
+static int uwritei(struct uinode *ip, char *src, uint off, uint n) {
+  uint tot, m;
+  struct ubuf *bp;
+  uint addr;
+  if(off + n < off) return -1;
+  for(tot = 0; tot < n; tot += m, off += m, src += m) {
+    addr = bmap(ip, off/BSIZE);
+    if(addr == 0) return -1;
+    bp = ubread(ROOTDEV, addr);
+    if(bp == 0) return -1;
+    m = umin(n - tot, BSIZE - off%BSIZE);
+    memmove(bp->data + off%BSIZE, src, m);
+    ubwrite(bp);
+    ubrelse(bp);
+  }
+  if(n > 0 && off > ip->size) {
+    ip->size = off;
+    uiupdate(ip);
+  }
+  return n;
+}
+
+static int ureadi(struct uinode *ip, char *dst, uint off, uint n) {
+  uint tot, m;
+  struct ubuf *bp;
+  uint addr;
+  if(off >= ip->size) return 0;
+  if(off + n > ip->size) n = ip->size - off;
+  for(tot = 0; tot < n; tot += m, off += m, dst += m) {
+    addr = bmap(ip, off/BSIZE);
+    if(addr == 0) return -1;
+    bp = ubread(ROOTDEV, addr);
+    if(bp == 0) return -1;
+    m = umin(n - tot, BSIZE - off%BSIZE);
+    memmove(dst, bp->data + off%BSIZE, m);
+    ubrelse(bp);
+  }
+  return n;
+}
+
+static struct uinode* dirlookup(struct uinode *dp, char *name, uint *poff) {
+  uint off;
+  struct dirent de;
+  if(dp->type != T_DIR) return 0;
+  for(off = 0; off < dp->size; off += sizeof(de)) {
+    int r = ureadi(dp, (char*)&de, off, sizeof(de));
+    if(r != sizeof(de))
+      return 0;
+    if(de.inum == 0) continue;
+    if(unamecmp(name, de.name) == 0) {
+      if(poff) *poff = off;
+      return uiget(dp->dev, de.inum);
+    }
+  }
+  return 0;
+}
+
+static int dirlink(struct uinode *dp, char *name, uint inum) {
+  uint off;
+  struct dirent de;
+  
+  // Check if name already exists
+  if(dirlookup(dp, name, 0) != 0)
+    return -1;
+  
+  // Find empty dirent
+  for(off = 0; off < dp->size; off += sizeof(de)) {
+    if(ureadi(dp, (char*)&de, off, sizeof(de)) != sizeof(de))
+      return -1;
+    if(de.inum == 0)
+      break;
+  }
+  
+  // Create new dirent
+  memset(&de, 0, sizeof(de));
+  memmove(de.name, name, DIRSIZ);
+  de.inum = inum;
+  if(uwritei(dp, (char*)&de, off, sizeof(de)) != sizeof(de))
+    return -1;
+  
+  if(off >= dp->size) {
+    dp->size = off + sizeof(de);
+    uiupdate(dp);
+  }
+  return 0;
+}
+
+static struct uinode* namei(char *path) {
+  struct uinode *ip, *next;
+  char name[DIRSIZ];
+  char *p;
+  ip = uiget(ROOTDEV, ROOTINO);  // treat relative paths as root-relative
+
+  p = path;
+  while(*p == '/') p++;
+  while(*p) {
+    char *s = p;
+    while(*p && *p != '/') p++;
+    int len = p - s;
+    if(len >= DIRSIZ) { memmove(name, s, DIRSIZ); name[DIRSIZ-1]=0; }
+    else { memmove(name, s, len); name[len] = 0; }
+    while(*p == '/') p++;
+    uilock(ip);
+    if(ip->type != T_DIR) { printf(1, "namei: not dir\n"); uiput(ip); return 0; }
+    next = dirlookup(ip, name, 0);
+    if(next == 0 && *p == 0) {
+      // File not found and this is the final component
+      printf(1, "namei: file not found\n");
+      uiput(ip);
+      return 0;
+    }
+    uiput(ip);
+    if(next == 0) { printf(1, "namei: intermediate not found\n"); return 0; }
+    ip = next;
+  }
+  return ip;
+}
+
+static struct uinode* nameiparent(char *path, char *name) {
+  struct uinode *ip, *next;
+  char *p;
+  if(*path == '/')
+    ip = uiget(ROOTDEV, ROOTINO);
+  else
+    return 0;
+  p = path;
+  while(*p == '/') p++;
+  
+  // Skip to parent directory
+  while(*p) {
+    char *s = p;
+    while(*p && *p != '/') p++;
+    int len = p - s;
+    if(len >= DIRSIZ) { memmove(name, s, DIRSIZ); name[DIRSIZ-1]=0; }
+    else { memmove(name, s, len); name[len] = 0; }
+    
+    // Check if this is the last component
+    while(*p == '/') p++;
+    if(*p == 0) return ip; // Found parent
+    
+    while(*p == '/') p++;
+    uilock(ip);
+    if(ip->type != T_DIR) { uiput(ip); return 0; }
+    next = dirlookup(ip, name, 0);
+    uiput(ip);
+    if(next == 0) return 0;
+    ip = next;
+  }
+  return 0;
+}
+
+static struct uinode* ialloc(short type) {
+  int inum;
+  struct ubuf *bp;
+  struct dinode *dip;
+  for(inum = 1; inum < sb.ninodes; inum++) {
+    bp = ubread(ROOTDEV, IBLOCK(inum, sb));
+    if(bp == 0) continue;
+    dip = (struct dinode*)bp->data + inum % IPB;
+    if(dip->type == 0) {
+      memset(dip, 0, sizeof(*dip));
+      dip->type = type;
+      ubwrite(bp);
+      ubrelse(bp);
+      return uiget(ROOTDEV, inum);
+    }
+    ubrelse(bp);
+  }
+  return 0;
+}
+
 struct fd_entry {
   int used;
   int owner_pid;
-  int file_index;
+  int fd;
   int off;
   int readable;
   int writable;
 };
 
-struct mem_file {
-  int used;
-  int size;
-  char path[IPC_PATH_SIZE];
-  char data[MAX_FILE_SIZE];
-};
-
 static struct fd_entry fd_table[MAX_REMOTE_FDS];
-static struct mem_file files[MAX_MEM_FILES];
+static struct uinode *fd_inodes[MAX_REMOTE_FDS];
 
-static void
-copy_path(char *dst, char *src, int n)
-{
+static int alloc_remote_fd(int owner_pid, int flags) {
   int i;
-  for(i = 0; i < n - 1 && src[i]; i++)
-    dst[i] = src[i];
-  dst[i] = 0;
-}
-
-static int
-path_equal(char *a, char *b)
-{
-  return strcmp(a, b) == 0;
-}
-
-static int
-find_file(char *path)
-{
-  int i;
-  for(i = 0; i < MAX_MEM_FILES; i++){
-    if(files[i].used && path_equal(files[i].path, path))
-      return i;
-  }
-  return -1;
-}
-
-static int
-create_file(char *path)
-{
-  int i;
-  for(i = 0; i < MAX_MEM_FILES; i++){
-    if(!files[i].used){
-      files[i].used = 1;
-      files[i].size = 0;
-      memset(files[i].data, 0, sizeof(files[i].data));
-      copy_path(files[i].path, path, sizeof(files[i].path));
-      return i;
-    }
-  }
-  return -1;
-}
-
-static int
-alloc_remote_fd(int owner_pid, int file_index, int flags)
-{
-  // DONE(15-server-fd-table): What: replace or extend this fixed table with the
-  // final server-side open-file table. Track owner pid, file offset, access
-  // mode, inode/file identity, reference count if dup/fork is supported, and
-  // cleanup state. Why: once fsserver stops using real_fd from kernel open(),
-  // this table becomes the server's source of truth for open files.
-  int i;
-  for(i = 0; i < MAX_REMOTE_FDS; i++){
-    if(!fd_table[i].used){
+  for(i = 0; i < MAX_REMOTE_FDS; i++) {
+    if(!fd_table[i].used) {
       fd_table[i].used = 1;
       fd_table[i].owner_pid = owner_pid;
-      fd_table[i].file_index = file_index;
+      fd_table[i].fd = i;
       fd_table[i].off = 0;
       fd_table[i].readable = !(flags & O_WRONLY);
       fd_table[i].writable = (flags & O_WRONLY) || (flags & O_RDWR);
@@ -108,197 +449,202 @@ alloc_remote_fd(int owner_pid, int file_index, int flags)
   return -1;
 }
 
-static struct fd_entry*
-lookup_remote_fd(int owner_pid, int remote_fd)
-{
-  if(remote_fd < 0 || remote_fd >= MAX_REMOTE_FDS)
-    return 0;
-  if(!fd_table[remote_fd].used)
-    return 0;
-  if(fd_table[remote_fd].owner_pid != owner_pid)
-    return 0;
+static struct fd_entry* lookup_remote_fd(int owner_pid, int remote_fd) {
+  if(remote_fd < 0 || remote_fd >= MAX_REMOTE_FDS) return 0;
+  if(!fd_table[remote_fd].used) return 0;
+  if(fd_table[remote_fd].owner_pid != owner_pid) return 0;
   return &fd_table[remote_fd];
 }
 
-static void
-close_all_for_owner(int owner_pid)
-{
-  // DONE(28-client-death-cleanup): What: make cleanup automatic when a client
-  // process exits or is killed. Use kernel notification, a reclaim message, or
-  // another explicit protocol instead of only manual shutdown. Why: the server
-  // must not leak open remote descriptors when clients die unexpectedly.
+static void close_all_for_owner(int owner_pid) {
   int i;
-  for(i = 0; i < MAX_REMOTE_FDS; i++){
-    if(fd_table[i].used && fd_table[i].owner_pid == owner_pid){
+  for(i = 0; i < MAX_REMOTE_FDS; i++) {
+    if(fd_table[i].used && fd_table[i].owner_pid == owner_pid) {
       fd_table[i].used = 0;
+      if(fd_inodes[i]) { uiput(fd_inodes[i]); fd_inodes[i] = 0; }
     }
   }
 }
 
-static void
-send_reply(int client_pid, int request_id, int result, int fd, int nbytes, char *data)
-{
+static void send_reply(int client_pid, int request_id, int result, int fd, int nbytes, char *data) {
   struct ipc_msg reply;
-
-  // DONE(13-reply-metadata): What: add enough reply metadata for robust clients:
-  // original request id, operation type, exact byte count, errno-style failure
-  // reason if desired, and continuation state for multi-chunk reads/writes.
-  // Why: clients need to match replies to requests and handle partial transfers
-  // without guessing.
   memset(&reply, 0, sizeof(reply));
   reply.type = IPC_TYPE_FS_REPLY;
   reply.request_id = request_id;
   reply.fd = fd;
   reply.result = result;
   reply.nbytes = nbytes;
-
-  if(data && nbytes > 0){
-    if(nbytes > IPC_DATA_SIZE)
-      nbytes = IPC_DATA_SIZE;
+  if(data && nbytes > 0) {
+    if(nbytes > IPC_DATA_SIZE) nbytes = IPC_DATA_SIZE;
     memmove(reply.data, data, nbytes);
   }
-
-  if(send(client_pid, &reply) < 0){
+  if(send(client_pid, &reply) < 0)
     printf(1, "fsserver: failed reply to pid %d\n", client_pid);
-  }
 }
 
-int
-main(void)
-{
+int main(void) {
   struct ipc_msg req;
   struct fd_entry *ent;
   int remote_fd;
-  int file_index;
-  int rc;
   int n;
-  struct mem_file *mf;
+  struct uinode *ip;
 
-  if(register_fsserver() < 0){
+  if(register_fsserver() < 0) {
     printf(1, "fsserver: register failed\n");
     exit();
   }
   printf(1, "fsserver: started (pid=%d)\n", getpid());
 
-  for(;;){
+  ubuf_init();
+  uinode_init();
+  readsb();
+
+  for(;;) {
     memset(&req, 0, sizeof(req));
-    if(recv(&req) < 0){
-      // DONE(27-daemon-error-policy): What: decide whether recv failures should
-      // retry, shut down, or notify the kernel that fsserver is unhealthy. Why:
-      // infinite retry is acceptable for a demo but weak for the final project
-      // analysis and recovery story.
+    if(recv(&req) < 0) {
       printf(1, "fsserver: recv failed\n");
       continue;
     }
 
-    if(req.type == IPC_TYPE_FS_SHUTDOWN){
+    if(req.type == IPC_TYPE_FS_SHUTDOWN) {
       close_all_for_owner(req.sender_pid);
       send_reply(req.sender_pid, req.request_id, 0, -1, 0, 0);
-      printf(1, "fsserver: shutdown requested by pid %d\n", req.sender_pid);
+      printf(1, "fsserver: shutdown\n");
       break;
     }
 
-    if(req.type == IPC_TYPE_FS_CLIENT_EXIT){
+    if(req.type == IPC_TYPE_FS_CLIENT_EXIT) {
       close_all_for_owner(req.sender_pid);
       continue;
     }
 
-    switch(req.type){
+    switch(req.type) {
     case IPC_TYPE_FS_OPEN:
-      // DONE(22-port-open): What: replace this syscall-backed open() with the
-      // ported xv6 open path: resolve req.path, create the inode when O_CREATE
-      // is set, reject invalid directory write modes, allocate a server-side
-      // file object, initialize offset/readable/writable state, and return a
-      // remote descriptor. Why: open() creates the server-side state that all
-      // later read/write/close requests depend on.
-      file_index = find_file(req.path);
-      if(file_index < 0 && (req.flags & O_CREATE))
-        file_index = create_file(req.path);
-      if(file_index < 0){
+      printf(1, "fsserver: OPEN path=%s flags=%d\n", req.path, req.flags);
+      ip = namei(req.path);
+      if(ip == 0 && (req.flags & O_CREATE)) {
+        // Need to create file - get parent directory (root for simple paths)
+        char name[DIRSIZ];
+        char *p = req.path;
+        while(*p == '/') p++;
+        char *s = p;
+        while(*p && *p != '/') p++;
+        int len = p - s;
+        if(len >= DIRSIZ) { memmove(name, s, DIRSIZ); name[DIRSIZ-1]=0; }
+        else { memmove(name, s, len); name[len] = 0; }
+        printf(1, "fsserver: creating file %s\n", name);
+        
+        // Get root directory
+        struct uinode *dp = uiget(ROOTDEV, ROOTINO);
+        if(dp == 0) {
+          printf(1, "fsserver: failed to get root\n");
+          send_reply(req.sender_pid, req.request_id, -1, -1, 0, 0);
+          break;
+        }
+        uilock(dp);
+        printf(1, "fsserver: root dir size=%d\n", dp->size);
+        
+        ip = ialloc(T_FILE);
+        if(ip == 0) {
+          printf(1, "fsserver: ialloc failed\n");
+          uiput(dp);
+          send_reply(req.sender_pid, req.request_id, -1, -1, 0, 0);
+          break;
+        }
+        printf(1, "fsserver: allocated inode %d\n", ip->inum);
+        uilock(ip);
+        ip->nlink = 1;
+        uiupdate(ip);
+        
+        if(dirlink(dp, name, ip->inum) < 0) {
+          printf(1, "fsserver: dirlink failed\n");
+          ip->nlink = 0;
+          uiupdate(ip);
+          uiput(ip);
+          uiput(dp);
+          send_reply(req.sender_pid, req.request_id, -1, -1, 0, 0);
+          break;
+        }
+        uiput(dp);
+      }
+      if(ip == 0) {
+        printf(1, "fsserver: file not found\n");
         send_reply(req.sender_pid, req.request_id, -1, -1, 0, 0);
         break;
       }
-      remote_fd = alloc_remote_fd(req.sender_pid, file_index, req.flags);
-      if(remote_fd < 0){
+      uilock(ip);
+      printf(1, "fsserver: file found, inum=%d size=%d\n", ip->inum, ip->size);
+      remote_fd = alloc_remote_fd(req.sender_pid, req.flags);
+      if(remote_fd < 0) {
+        uiput(ip);
         send_reply(req.sender_pid, req.request_id, -1, -1, 0, 0);
         break;
       }
+      fd_inodes[remote_fd] = ip;
       send_reply(req.sender_pid, req.request_id, remote_fd, remote_fd, 0, 0);
       break;
 
     case IPC_TYPE_FS_READ:
-      // DONE(23-port-read): What: replace this syscall-backed read() with the
-      // ported file/inode read path. Validate the remote descriptor, enforce
-      // readable mode, read from the server-side file offset, advance the offset
-      // on success, and split responses into IPC_DATA_SIZE chunks as needed.
-      // Why: read() proves fsserver can return actual file data without relying
-      // on the kernel's normal fileread() path.
       ent = lookup_remote_fd(req.sender_pid, req.fd);
-      if(ent == 0 || !ent->readable){
+      if(!ent || !ent->readable) {
+        send_reply(req.sender_pid, req.request_id, -1, req.fd, 0, 0);
+        break;
+      }
+      ip = fd_inodes[req.fd];
+      if(!ip) {
         send_reply(req.sender_pid, req.request_id, -1, req.fd, 0, 0);
         break;
       }
       n = req.nbytes;
-      if(n < 0)
-        n = 0;
-      if(n > IPC_DATA_SIZE)
-        n = IPC_DATA_SIZE;
-      mf = &files[ent->file_index];
-      if(ent->off >= mf->size){
+      if(n > IPC_DATA_SIZE) n = IPC_DATA_SIZE;
+      if(ent->off >= ip->size) {
         send_reply(req.sender_pid, req.request_id, 0, req.fd, 0, 0);
         break;
       }
-      if(n > mf->size - ent->off)
-        n = mf->size - ent->off;
-      memmove(req.data, mf->data + ent->off, n);
-      ent->off += n;
-      send_reply(req.sender_pid, req.request_id, n, req.fd, n, req.data);
+      if(n > ip->size - ent->off) n = ip->size - ent->off;
+      n = ureadi(ip, req.data, ent->off, n);
+      if(n < 0)
+        send_reply(req.sender_pid, req.request_id, -1, req.fd, 0, 0);
+      else {
+        ent->off += n;
+        send_reply(req.sender_pid, req.request_id, n, req.fd, n, req.data);
+      }
       break;
 
     case IPC_TYPE_FS_WRITE:
-      // DONE(24-port-write): What: replace this syscall-backed write() with the
-      // ported file/inode write path. Validate writable mode, handle writes
-      // larger than one IPC payload, preserve xv6 log transaction boundaries,
-      // update the file offset, and define partial-write behavior. Why: write()
-      // is the hardest operation because it mutates blocks, may grow files, and
-      // must keep on-disk state consistent.
       ent = lookup_remote_fd(req.sender_pid, req.fd);
-      if(ent == 0 || !ent->writable){
+      if(!ent || !ent->writable) {
+        send_reply(req.sender_pid, req.request_id, -1, req.fd, 0, 0);
+        break;
+      }
+      ip = fd_inodes[req.fd];
+      if(!ip) {
         send_reply(req.sender_pid, req.request_id, -1, req.fd, 0, 0);
         break;
       }
       n = req.nbytes;
+      if(n > IPC_DATA_SIZE) n = IPC_DATA_SIZE;
+      n = uwritei(ip, req.data, ent->off, n);
       if(n < 0)
-        n = 0;
-      if(n > IPC_DATA_SIZE)
-        n = IPC_DATA_SIZE;
-      mf = &files[ent->file_index];
-      if(ent->off + n > MAX_FILE_SIZE)
-        n = MAX_FILE_SIZE - ent->off;
-      if(n < 0)
-        n = 0;
-      memmove(mf->data + ent->off, req.data, n);
-      ent->off += n;
-      if(ent->off > mf->size)
-        mf->size = ent->off;
-      send_reply(req.sender_pid, req.request_id, n, req.fd, 0, 0);
+        send_reply(req.sender_pid, req.request_id, -1, req.fd, 0, 0);
+      else {
+        ent->off += n;
+        send_reply(req.sender_pid, req.request_id, n, req.fd, 0, 0);
+      }
       break;
 
     case IPC_TYPE_FS_CLOSE:
-      // DONE(25-port-close): What: replace this syscall-backed close() with
-      // server-side file reference cleanup. Drop the remote fd mapping, release
-      // the underlying inode/file object when the last reference closes, and
-      // make repeated close or wrong-owner close return a defined error. Why:
-      // close() is what prevents leaked server-side file objects after normal
-      // client use.
       ent = lookup_remote_fd(req.sender_pid, req.fd);
-      if(ent == 0){
+      if(!ent) {
         send_reply(req.sender_pid, req.request_id, -1, req.fd, 0, 0);
         break;
       }
+      if(fd_inodes[req.fd]) {
+        uiput(fd_inodes[req.fd]);
+        fd_inodes[req.fd] = 0;
+      }
       ent->used = 0;
-      rc = 0;
-      send_reply(req.sender_pid, req.request_id, rc, req.fd, 0, 0);
+      send_reply(req.sender_pid, req.request_id, 0, req.fd, 0, 0);
       break;
 
     default:
