@@ -80,6 +80,37 @@ void test6(void)
     printf(1, "test6: FAIL (read allowed)\n");
 }
 
+void test7(void)
+{
+  // Test write then read in same test
+  int fd = open("e.txt", O_CREATE|O_RDWR);
+  if (fd < 0) {
+    printf(1, "test7: FAIL (open)\n");
+    return;
+  }
+  int n = write(fd, "hello", 5);
+  if (n != 5) {
+    printf(1, "test7: FAIL (write)\n");
+    close(fd);
+    return;
+  }
+  // Reopen for reading
+  close(fd);
+  fd = open("e.txt", O_RDONLY);
+  if (fd < 0) {
+    printf(1, "test7: FAIL (reopen)\n");
+    return;
+  }
+  char buf[16];
+  n = read(fd, buf, 16);
+  printf(1, "test7: read %d bytes\n", n);
+  close(fd);
+  if (n == 5)
+    printf(1, "test7: PASS\n");
+  else
+    printf(1, "test7: FAIL\n");
+}
+
 int main(void)
 {
   test1();
@@ -88,5 +119,6 @@ int main(void)
   test4();
   test5();
   test6();
+  test7();
   exit();
 }
