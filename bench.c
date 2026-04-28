@@ -16,7 +16,7 @@ void test1_time_create(void)
   end = rdtsc();
   
   if (fd >= 0) {
-    printf(1, "Create/Open: %d cycles\n", (int)(end - start));
+    printf(1, "======Create/Open: %d cycles======\n", (int)(end - start));
     close(fd);
   } else {
     printf(1, "Create/Open: FAIL\n");
@@ -34,7 +34,7 @@ void test2_time_write(void)
   end = rdtsc();
   
   if (n == 17) {
-    printf(1, "Write (17 bytes): %d cycles\n", (int)(end - start));
+    printf(1, "======Write (17 bytes): %d cycles======\n", (int)(end - start));
   } else {
     printf(1, "Write: FAIL\n");
   }
@@ -54,7 +54,7 @@ void test3_time_read(void)
   end = rdtsc();
   
   if (n > 0) {
-    printf(1, "Read (17 bytes): %d cycles\n", (int)(end - start));
+    printf(1, "======Read (17 bytes): %d cycles======\n", (int)(end - start));
   } else {
     printf(1, "Read: FAIL\n");
   }
@@ -71,7 +71,7 @@ void test4_time_close(void)
   close(fd);
   end = rdtsc();
   
-  printf(1, "Close: %d cycles\n", (int)(end - start));
+  printf(1, "======Close: %d cycles======\n", (int)(end - start));
 }
 
 void test5_time_invalid_access(void)
@@ -85,7 +85,7 @@ void test5_time_invalid_access(void)
   end = rdtsc();
   
   if (n < 0) {
-    printf(1, "Write block (O_RDONLY): %d cycles\n", (int)(end - start));
+    printf(1, "======Write block (O_RDONLY): %d cycles======\n", (int)(end - start));
   } else {
     printf(1, "Write block: FAIL\n");
   }
