@@ -1,9 +1,9 @@
 #include "types.h"
-#include "user.h"
 #include "fcntl.h"
 #include "ipc.h"
 #include "fs.h"
 #include "stat.h"
+#include "user.h"
 
 #define MAX_REMOTE_FDS 64
 #define NINODE 32
@@ -38,6 +38,17 @@ struct uinode {
 
 #define I_VALID 0x2
 #define umin(a, b) ((a) < (b) ? (a) : (b))
+
+char*
+strncpy(char *s, const char *t, int n)
+{
+  char *os = s;
+  while(n-- > 0 && (*s++ = *t++) != 0)
+    ;
+  while(n-- > 0)
+    *s++ = 0;
+  return os;
+}
 
 static int unamecmp(char *s1, char *s2) {
   while(*s1 && *s2 && *s1 == *s2) { s1++; s2++; }
@@ -290,7 +301,7 @@ static int ureadi(struct uinode *ip, char *dst, uint off, uint n) {
   return n;
 }
 
-static struct uinode* dirlookup(struct uinode *dp, char *name, uint *poff) {
+struct uinode* dirlookup(struct uinode *dp, char *name, uint *poff) {
   uint off;
   struct dirent de;
   if(dp->type != T_DIR) return 0;
@@ -307,33 +318,34 @@ static struct uinode* dirlookup(struct uinode *dp, char *name, uint *poff) {
   return 0;
 }
 
-static int dirlink(struct uinode *dp, char *name, uint inum) {
-  uint off;
+int
+dirlink(struct uinode *dp, char *name, uint inum)
+{
+  int off;
   struct dirent de;
-  
-  // Check if name already exists
-  if(dirlookup(dp, name, 0) != 0)
+  struct uinode *ip;
+
+  // Check that name is not present.
+  if((ip = dirlookup(dp, name, 0)) != 0){
+    uiput(ip);
     return -1;
-  
-  // Find empty dirent
-  for(off = 0; off < dp->size; off += sizeof(de)) {
+  }
+
+  // Look for an empty dirent.
+  for(off = 0; off < dp->size; off += sizeof(de)){
     if(ureadi(dp, (char*)&de, off, sizeof(de)) != sizeof(de))
-      return -1;
+	exit();
+	//panic
     if(de.inum == 0)
       break;
   }
-  
-  // Create new dirent
-  memset(&de, 0, sizeof(de));
-  memmove(de.name, name, DIRSIZ);
+
+  strncpy(de.name, name, DIRSIZ);
   de.inum = inum;
   if(uwritei(dp, (char*)&de, off, sizeof(de)) != sizeof(de))
-    return -1;
-  
-  if(off >= dp->size) {
-    dp->size = off + sizeof(de);
-    uiupdate(dp);
-  }
+	exit();
+	//panic
+
   return 0;
 }
 
